@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:test_vtpad_reporter/parser/parsed_line.dart';
+
 import 'model.dart';
 
 class Parser {
@@ -41,120 +43,123 @@ class Parser {
     Map<String, dynamic> line;
     try {
       line = jsonDecode(jsonString);
+      final parsedLine = ParsedLine.fromJson(line);
+
+      switch (parsedLine) {
+        case ParsedSuite():
+          _parseTestSuite(parsedLine);
+          break;
+        case ParsedGroup():
+          _parseTestGroup(parsedLine);
+          break;
+        case ParsedTestStart():
+          _parseTestStart(parsedLine);
+          break;
+        case ParsedError():
+          _parseTestError(parsedLine);
+          break;
+        case ParsedPrint():
+          _parseTestMessage(parsedLine);
+          break;
+        case ParsedTestDone():
+          _parseTestDone(parsedLine);
+          break;
+        case ParsedUnknown():
+          return;
+      }
     } catch (e) {
       return;
     }
+  }
 
-    if (line.containsKey('type')) {
-      _parseTestSuite(line);
-      _parseTestGroup(line);
-      _parseTestStart(line);
-      _parseTestError(line);
-      _parseTestMessage(line);
-      _parseTestDone(line);
+  void _parseTestSuite(ParsedSuite line) {
+    final suite = SuiteModel(
+      id: line.suite.id,
+      name: line.suite.path.toString().split('/').last.split('.').first,
+    );
+    suits.putIfAbsent(line.suite.id, () => suite);
+  }
+
+  void _parseTestGroup(ParsedGroup line) {
+    if (line.group.parentID == null) return;
+    final group = GroupModel(
+      id: line.group.id,
+      name: line.group.name,
+    );
+    suits[line.group.suiteID]?.groups.putIfAbsent(line.group.id, () => group);
+  }
+
+  void _parseTestStart(ParsedTestStart line) {
+    final test = TestModel(
+      id: line.test.id,
+      name: line.test.name,
+      duration: line.time,
+    );
+
+    if (line.test.groupIDs.lastOrNull == null) return;
+    if (line.test.name.startsWith('loading /')) return;
+
+    final sId = line.test.suiteID;
+    final gId = line.test.groupIDs.last;
+
+    testsIds[line.test.id] = (sId, gId);
+    suits[sId]?.groups[gId]?.tests.putIfAbsent(
+          test.id,
+          () => test,
+        );
+
+    if (line.test.metadata.skip) {
+      test.state = State.skipped;
     }
   }
 
-  void _parseTestSuite(Map<String, dynamic> line) {
-    if (line['type'] == 'suite') {
-      int id = line['suite']['id'];
-      String name = line['suite']['path'].toString().split('/').last.split('.').first;
-      final suite = SuiteModel(
-        id: id,
-        name: name,
-      );
-      suits.putIfAbsent(id, () => suite);
-    }
-  }
+  void _parseTestError(ParsedError line) {
+    final (suiteId, groupId) = (
+      testsIds[line.testID]?.$1,
+      testsIds[line.testID]?.$2,
+    );
 
-  void _parseTestGroup(Map<String, dynamic> line) {
-    if (line['type'] == 'group') {
-      int id = line['group']['id'];
-      int? parentId = line['group']['parentID'];
-      int suiteId = line['group']['suiteID'];
-      String name = line['group']['name'];
-      if (parentId == null) return;
+    if (groupId == null || suiteId == null) return;
 
-      final group = GroupModel(id: id, name: name);
-      suits[suiteId]?.groups.putIfAbsent(id, () => group);
-    }
-  }
-
-  void _parseTestStart(Map<String, dynamic> line) {
-    if (line['type'] == 'testStart') {
-      int id = line['test']['id'];
-      String name = line['test']['name'];
-
-      int? groupId = (line['test']['groupIDs'] as List?)?.lastOrNull;
-      if (groupId == null) return;
-      int suiteId = line['test']['suiteID'];
-
-      if (name.startsWith('loading /')) {
-        return;
-      }
-
-      testsIds[id] = (suiteId, groupId);
-      final test = TestModel(id: id, name: name, duration: line['time']);
-      suits[suiteId]?.groups[groupId]?.tests.putIfAbsent(id, () => test);
-
-      if (line['test']['metadata']['skip']) {
-        test.state = State.skipped;
-      }
-    }
-  }
-
-  void _parseTestError(Map<String, dynamic> line) {
-    if (line['type'] == 'error') {
-      int id = line['testID'];
-      String error = line['error'];
-
-      final (suiteId, groupId) = (testsIds[id]?.$1, testsIds[id]?.$2);
-
-      if (groupId == null || suiteId == null) return;
-
-      final model = suits[suiteId]?.groups[groupId]?.tests[id];
-      if (model != null) {
-        if (!error.startsWith('Test failed. See exception logs above.')) {
-          model.error = error.endsWith('\n') ? '\t$error' : '\t$error\n';
-        }
+    final model = suits[suiteId]?.groups[groupId]?.tests[line.testID];
+    if (model != null) {
+      if (!line.error.startsWith('Test failed. See exception logs above.')) {
+        model.error = line.error.endsWith('\n') ? '\t${line.error}' : '\t${line.error}\n';
       }
     }
   }
 
-  void _parseTestMessage(Map<String, dynamic> line) {
-    if (line['type'] == 'print') {
-      int id = line['testID'];
-      String message = line['message'];
+  void _parseTestMessage(ParsedPrint line) {
+    final (suiteId, groupId) = (
+      testsIds[line.testID]?.$1,
+      testsIds[line.testID]?.$2,
+    );
+    if (groupId == null || suiteId == null) return;
 
-      final (suiteId, groupId) = (testsIds[id]?.$1, testsIds[id]?.$2);
+    final model = suits[suiteId]?.groups[groupId]?.tests[line.testID];
 
-      if (groupId == null || suiteId == null) return;
-
-      final model = suits[suiteId]?.groups[groupId]?.tests[id];
-      if (model != null && message.isNotEmpty) {
-        model.message = '\t$message\n';
-      }
+    if (model != null && line.message.isNotEmpty) {
+      model.message = '\t${line.message}\n';
     }
   }
 
-  void _parseTestDone(Map<String, dynamic> line) {
-    if (line['type'] == 'testDone') {
-      int id = line['testID'];
+  void _parseTestDone(ParsedTestDone line) {
+    final (suiteId, groupId) = (
+      testsIds[line.testID]?.$1,
+      testsIds[line.testID]?.$2,
+    );
 
-      final (suiteId, groupId) = (testsIds[id]?.$1, testsIds[id]?.$2);
+    if (groupId == null || suiteId == null) return;
 
-      if (groupId == null || suiteId == null) return;
+    final model = suits[suiteId]?.groups[groupId]?.tests[line.testID];
 
-      final model = suits[suiteId]?.groups[groupId]?.tests[id];
-
-      if (model != null && model.state == null) {
-        final time = model.duration;
-        final nowTime = line['time'];
-        if (time != null && nowTime != null) {
-          model.duration = nowTime - time;
-        }
-        model.state = line['result'] == 'success' ? State.success : State.failure;
+    if (model != null && model.state == null) {
+      final time = model.duration;
+      final nowTime = line.time;
+      if (time != null && nowTime != null) {
+        model.duration = nowTime - time;
       }
+      model.state = line.result == 'success' ? State.success : State.failure;
     }
   }
 }

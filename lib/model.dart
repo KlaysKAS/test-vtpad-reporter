@@ -61,7 +61,7 @@ class GroupModel {
 
   @override
   String toString() {
-    return 'SuiteModel { $id $name $duration }';
+    return 'GroupModel { $id $name $duration }';
   }
 }
 
